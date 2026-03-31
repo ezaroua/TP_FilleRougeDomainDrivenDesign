@@ -1,35 +1,28 @@
-# Context Map — Relations entre Bounded Contexts
+# Context Map
 
-## Relations identifiées
+## Schéma général
 
-| Relation | Contexts | Direction | Justification |
-|----------|----------|-----------|---------------|
-| **Partnership** | Réservations ↔ Paiements | Bidirectionnelle | Collaboration étroite : une réservation déclenche un paiement, la validation du paiement confirme la réservation. Succès mutuel requis. |
-| **Anti-Corruption Layer (ACL)** | Réservations → Catalogue | Unidirectionnelle | Réservations consomme les données du Catalogue (film, séance, salle) via une couche d'adaptation pour protéger son modèle interne. |
-| **Conformist** | Paiements → Stripe API (externe) | Unidirectionnelle | Paiements se conforme strictement au modèle imposé par l'API bancaire externe sans négociation possible. |
-| **Customer/Supplier** | Catalogue → Réservations | Unidirectionnelle (upstream/downstream) | Catalogue est upstream : il publie des événements (SéancePlanifiée) que Réservations consomme pour initialiser les disponibilités. |
-
-## Schéma des relations
 ```
 ┌──────────────────┐
 │    CATALOGUE     │ (Upstream)
 │   (Supporting)   │
 └────────┬─────────┘
-         │ Customer/Supplier
+         │ Customer/Supplier (Client/Fournisseur)
          │ (SéancePlanifiée)
          ▼
     ┌─────────────────────┐
     │   RÉSERVATIONS      │ (Core)
-    │    ◄──── ACL        │
+    │  ◄── ACL            │
+    │  (Couche Anti-Corr.)│
     └──────┬──────────────┘
            │
-           │ Partnership
+           │ Partnership (Partenariat)
            │ (bidirectionnel)
            │
     ┌──────▼──────────────┐
     │    PAIEMENTS        │ (Generic)
     └──────┬──────────────┘
-           │ Conformist
+           │ Conformist (Conformiste)
            ▼
     ┌─────────────────────┐
     │   Stripe API        │ (Externe)
@@ -37,109 +30,43 @@
     └─────────────────────┘
 ```
 
-## Détails des relations
+---
 
-### 1. Partnership : Réservations ↔ Paiements
+## Relations et patterns
 
-**Nature de la collaboration :**
-- **Réservations → Paiements** : Envoie une commande de paiement avec montant total
-- **Paiements → Réservations** : Notifie le succès/échec pour confirmation finale
-
-**Contrat d'échange :**
-```json
-// Réservations → Paiements
-{
-  "reservation_id": "RES-123",
-  "montant_total": 34.50,
-  "client_id": "CLI-456"
-}
-
-// Paiements → Réservations
-{
-  "transaction_id": "TXN-789",
-  "reservation_id": "RES-123",
-  "statut": "success"
-}
-```
-
-**Justification :** Les deux contexts doivent rester synchronisés pour garantir qu'aucune réservation confirmée n'est impayée, et aucun paiement orphelin n'existe.
+| Contexte source | Contexte cible | Pattern de relation | Justification |
+|-----------------|----------------|---------------------|---------------|
+| **ContexteRéservation** | **ContextePaiement** | Partnership (Partenariat) | Collaboration étroite et bidirectionnelle : une réservation déclenche un paiement, et la validation du paiement confirme la réservation. Les deux contextes doivent rester synchronisés pour garantir qu'aucune réservation confirmée n'est impayée et qu'aucun paiement orphelin n'existe. Le succès des deux est mutuellement requis. |
+| **ContexteRéservation** | **ContexteCatalogue** | Anti-Corruption Layer (Couche Anti-Corruption) | ContexteRéservation consomme les données du Catalogue (film, séance, salle) via une couche d'adaptation qui traduit le modèle riche du Catalogue vers les besoins minimaux de Réservation. Cela protège le modèle interne de Réservation des changements dans Catalogue et évite la pollution du modèle métier avec des données non pertinentes. |
+| **ContexteCatalogue** | **ContexteRéservation** | Customer/Supplier (Client/Fournisseur) | Catalogue est upstream : il publie des événements (SéancePlanifiée) que Réservations consomme pour initialiser les disponibilités des places. Catalogue définit les séances de manière autoritaire et Réservations dépend de ces informations pour créer son état initial. |
+| **ContextePaiement** | **Stripe API (externe)** | Conformist (Conformiste) | Stripe impose son propre modèle (PaymentIntent, charges, webhooks). ContextePaiement doit s'y conformer strictement sans possibilité de négociation. Aucune adaptation du modèle externe n'est possible, le contexte s'aligne intégralement sur le prestataire. |
 
 ---
 
-### 2. Anti-Corruption Layer : Réservations → Catalogue
+## Intégrations techniques envisagées
 
-**Problématique :**
-Le Catalogue expose un modèle riche (Film avec multiples attributs) mais Réservations n'a besoin que d'informations minimales (ID séance, heure, salle).
+### Intégration 1 — API REST entre ContexteRéservation et ContextePaiement
+- **Type** : API REST synchrone
+- **BCs impliqués** : ContexteRéservation (appelant) → ContextePaiement (fournisseur)
+- **Cas d'usage** : Lorsqu'un client valide son panier, ContexteRéservation appelle l'endpoint de ContextePaiement pour initier une transaction. ContextePaiement répond avec le statut de la transaction (succès ou échec), ce qui permet à ContexteRéservation de confirmer ou d'annuler la réservation.
 
-**Solution ACL :**
-```python
-# adapters/catalogue_adapter.py
-class CatalogueAdapter:
-    def get_seance_info(self, seance_id: str) -> SeanceInfo:
-        # Appel API Catalogue
-        raw_data = catalogue_api.get_seance(seance_id)
-        # Transformation vers modèle Réservations
-        return SeanceInfo(
-            seance_id=raw_data["id"],
-            heure_debut=raw_data["horaire"]["debut"],
-            salle_id=raw_data["salle"]["id"]
-        )
-```
+### Intégration 2 — Événements via broker entre ContexteCatalogue et ContexteRéservation
+- **Type** : Événements asynchrones via message broker (ex : RabbitMQ ou Kafka)
+- **BCs impliqués** : ContexteCatalogue (producteur) → ContexteRéservation (consommateur)
+- **Cas d'usage** : Lorsqu'une nouvelle séance est planifiée dans le Catalogue, un événement `SéancePlanifiée` est publié sur le broker. ContexteRéservation consomme cet événement pour initialiser automatiquement la liste des places disponibles pour cette séance.
 
-**Justification :** Protège Réservations des changements dans Catalogue et évite la pollution du modèle métier avec des données non pertinentes.
-
----
-
-### 3. Conformist : Paiements → Stripe API
-
-**Contrainte :**
-Stripe impose son modèle (PaymentIntent, charges, webhooks). Paiements doit s'y conformer sans pouvoir le modifier.
-
-**Adaptation :**
-```python
-# adapters/stripe_adapter.py
-class StripeAdapter:
-    def process_payment(self, montant: Money, metadata: dict) -> Transaction:
-        # Conversion vers format Stripe
-        stripe_intent = stripe.PaymentIntent.create(
-            amount=int(montant.euros * 100),  # centimes
-            currency="eur",
-            metadata=metadata
-        )
-        # Retour vers domaine Paiements
-        return Transaction(
-            id=stripe_intent.id,
-            montant=montant,
-            statut=self._map_status(stripe_intent.status)
-        )
-```
-
-**Justification :** Aucune négociation possible avec un prestataire externe, le context s'adapte intégralement.
-
----
-
-### 4. Customer/Supplier : Catalogue → Réservations
-
-**Flux d'événements :**
-```
-Catalogue (Upstream)
-    │ publish: SéancePlanifiée
-    │          {seance_id, salle_id, capacité, horaire}
-    ▼
-Réservations (Downstream)
-    │ consumes & reacts:
-    └──> Initialiser la disponibilité des N places
-```
-
-**Justification :** Catalogue définit les séances de manière autoritaire. Réservations dépend de ces informations pour créer son état initial (liste des places disponibles).
+### Intégration 3 — Événements asynchrones entre ContextePaiement et ContexteRéservation
+- **Type** : Événements asynchrones via message broker
+- **BCs impliqués** : ContextePaiement (producteur) → ContexteRéservation (consommateur)
+- **Cas d'usage** : Une fois la transaction bancaire traitée par Stripe, ContextePaiement publie un événement `PaiementValidé` ou `PaiementÉchoué`. ContexteRéservation consomme cet événement pour finaliser la confirmation de la réservation ou libérer les places bloquées.
 
 ---
 
 ## Matrice de dépendances
 
-| Context | Dépend de | Type de dépendance |
-|---------|-----------|-------------------|
-| Réservations | Catalogue | Données (ACL) |
-| Réservations | Paiements | Collaboration (Partnership) |
-| Paiements | Stripe API | Conformité stricte (Conformist) |
-| Catalogue | - | Autonome |
+| Contexte | Dépend de | Type de dépendance |
+|----------|-----------|--------------------|
+| ContexteRéservation | ContexteCatalogue | Données via Anti-Corruption Layer (Couche Anti-Corruption) |
+| ContexteRéservation | ContextePaiement | Collaboration — Partnership (Partenariat) |
+| ContextePaiement | Stripe API | Conformist (Conformiste) |
+| ContexteCatalogue | — | Autonome |

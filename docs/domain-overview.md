@@ -26,10 +26,7 @@
 
 ## Schéma de répartition
 
-```
-TODO 
-
-```
+![Schéma de répartition des sous-domaines](images/SchemaDeRep.webp)
 
 ## Notes et réflexions
 
