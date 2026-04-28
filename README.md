@@ -1,7 +1,7 @@
 # TP fil rouge — Domain-Driven Design
 
 **Scénario** : Billetterie & réservation — réseau de cinémas
-**Auteur** : Kevin CARTTIGUEANE — ESGI M2
+**Auteur** : Kevin CARTTIGUEANE EZAROUALI Abdelkader — ESGI M2
 **Date** : 2026-04-27
 
 > TP **100 % conceptuel** — modélisation, documentation et schémas. **Aucun code applicatif** n'est requis.
